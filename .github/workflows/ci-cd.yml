@@ -1,11 +1,9 @@
-```yaml
 name: Django CI/CD
 
 on:
   push:
     branches:
       - main
-
   pull_request:
     branches:
       - main
@@ -38,4 +36,3 @@ jobs:
           APP_VERSION: ${{ github.sha }}
         run: |
           python manage.py test
-```
