@@ -66,6 +66,22 @@ jobs:
             -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${GITHUB_SHA} \
             .
 
+      # TEMPORARY: Debug GitHub OIDC claims
+      - name: Debug GitHub OIDC claims
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+            const payload = JSON.parse(
+              Buffer.from(token.split('.')[1], 'base64url').toString()
+            );
+            console.log('Repository:', payload.repository);
+            console.log('Subject:', payload.sub);
+            console.log('Audience:', payload.aud);
+            console.log('Ref:', payload.ref);
+            console.log('Event:', process.env.GITHUB_EVENT_NAME);
+
       # AWS authentication happens only on main pushes
       - name: Configure AWS credentials using OIDC
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
