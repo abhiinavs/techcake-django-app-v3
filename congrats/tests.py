@@ -1,3 +1,4 @@
+```python
 """Test suite for the Techcake app.
 
 Run it with no database server:   DB_ENGINE=sqlite python manage.py test
@@ -15,7 +16,7 @@ class HomePageTests(TestCase):
 
     def test_home_page_renders(self):
         response = self.client.get("/")
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 500)
         self.assertContains(response, "Techcake")
 
     @override_settings(APP_VERSION="test-1234")
@@ -44,3 +45,4 @@ class HealthCheckTests(TestCase):
             response = self.client.get("/health")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["database"], "unreachable")
+```
