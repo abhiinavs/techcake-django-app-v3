@@ -9,8 +9,8 @@ from django.core.cache import cache
 from django.test import TestCase, override_settings
 
 class HomePageTests(TestCase):
-def setUp(self):
-cache.clear()
+    def setUp(self):
+        cache.clear()
 
 ```
 def test_home_page_renders(self):
