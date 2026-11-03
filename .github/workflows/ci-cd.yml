@@ -12,8 +12,6 @@ permissions:
   contents: read
 
 jobs:
-
-  # JOB 1: Run Django tests first
   test:
     name: Run Django Tests
     runs-on: ubuntu-latest
@@ -39,8 +37,6 @@ jobs:
         run: |
           python manage.py test
 
-  # JOB 2: Build Docker image
-  # Runs only after Django tests pass
   build:
     name: Build Docker Image
     needs: test
@@ -66,7 +62,19 @@ jobs:
             -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${GITHUB_SHA} \
             .
 
-      # AWS authentication happens only on main pushes
       - name: Configure AWS credentials using OIDC
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: a
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::506456084381:role/GitHubActionsECRPushRole
+          aws-region: ap-south-1
+
+      - name: Login to Amazon ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push Docker image to ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker push \
+            ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${GITHUB_SHA}
