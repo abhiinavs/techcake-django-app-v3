@@ -38,7 +38,7 @@ jobs:
           python manage.py test
 
   build:
-    name: Build Docker Image
+    name: Build and Scan Docker Image
     needs: test
     runs-on: ubuntu-latest
 
@@ -61,6 +61,25 @@ jobs:
             --build-arg APP_VERSION=${GITHUB_SHA} \
             -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${GITHUB_SHA} \
             .
+
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          format: json
+          output: trivy-report.json
+          severity: CRITICAL
+          exit-code: '1'
+          scanners: vuln
+
+      - name: Upload Trivy scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-report-${{ github.sha }}
+          path: trivy-report.json
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Configure AWS credentials using OIDC
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
