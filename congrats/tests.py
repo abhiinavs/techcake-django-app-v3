@@ -2,6 +2,8 @@
 
 Run it with no database server:
 DB_ENGINE=sqlite python manage.py test
+
+Your CI pipeline must run these and stop if any fail.
 """
 
 from django.core.cache import cache
