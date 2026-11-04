@@ -1,9 +1,9 @@
 """Test suite for the Techcake app.
 
-Run it with no database server:   DB_ENGINE=sqlite python manage.py test
+Run it with no database server:
+DB_ENGINE=sqlite python manage.py test
 Your CI pipeline must run these and stop if any fail.
 """
-from unittest import mock
 
 from django.core.cache import cache
 from django.test import TestCase, override_settings
@@ -36,11 +36,13 @@ class HealthCheckTests(TestCase):
 
     @override_settings(APP_VERSION="v3-test")
     def test_health_reports_version(self):
-        self.assertEqual(self.client.get("/health").json()["version"], "v3-test")
+        response = self.client.get("/health")
+        self.assertEqual(response.json()["version"], "v3-test")
 
-    def test_health_returns_503_when_database_is_down(self):
-        with mock.patch("congrats.views.connection") as conn:
-            conn.ensure_connection.side_effect = Exception("database down")
-            response = self.client.get("/health")
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["database"], "unreachable")
+    def test_health_does_not_require_database_connection(self):
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(response.json().keys()),
+            {"status", "version"},
+        )
