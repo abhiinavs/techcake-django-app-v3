@@ -97,3 +97,158 @@ jobs:
         run: |
           docker push \
             ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${GITHUB_SHA}
+
+  deploy:
+    name: Deploy to EC2 with Automatic Rollback
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      AWS_REGION: ap-south-1
+      INSTANCE_ID: i-0469d99aa3e2a6a7a
+      DEPLOY_SHA: ${{ github.sha }}
+
+    steps:
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::506456084381:role/GitHubActionsECRPushRole
+          aws-region: ap-south-1
+
+      - name: Deploy, verify and rollback if necessary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          send_ssm() {
+            local script="$1"
+            local params
+            params=$(jq -n --arg script "$script" '{commands: [$script]}')
+
+            local command_id
+            command_id=$(aws ssm send-command \
+              --instance-ids "$INSTANCE_ID" \
+              --document-name "AWS-RunShellScript" \
+              --parameters "$params" \
+              --query "Command.CommandId" \
+              --output text)
+
+            echo "SSM Command ID: $command_id"
+
+            for attempt in $(seq 1 60); do
+              local status
+              status=$(aws ssm get-command-invocation \
+                --command-id "$command_id" \
+                --instance-id "$INSTANCE_ID" \
+                --query "Status" \
+                --output text 2>/dev/null || true)
+
+              if [ "$status" = "Success" ]; then
+                echo "SSM command succeeded."
+                return 0
+              fi
+
+              case "$status" in
+                Failed|Cancelled|TimedOut|Undeliverable|Terminated)
+                  aws ssm get-command-invocation \
+                    --command-id "$command_id" \
+                    --instance-id "$INSTANCE_ID" \
+                    --query "StandardErrorContent" \
+                    --output text || true
+                  return 1
+                  ;;
+              esac
+
+              sleep 5
+            done
+
+            echo "SSM command timed out."
+            return 1
+          }
+
+          DEPLOY_SCRIPT=$(cat <<EOF
+          set -euo pipefail
+          cd /opt/techcake-django-app-v2
+
+          PREVIOUS_SHA=\$(cat .last-good-sha)
+          echo "\$PREVIOUS_SHA" > .rollback-sha
+
+          echo "APP_VERSION=$DEPLOY_SHA" > .deploy.env
+
+          aws ecr get-login-password --region ap-south-1 | \
+            docker login --username AWS --password-stdin \
+            506456084381.dkr.ecr.ap-south-1.amazonaws.com
+
+          docker compose --env-file .deploy.env pull django
+          docker compose --env-file .deploy.env up -d django
+          EOF
+          )
+
+          echo "Deploying commit: $DEPLOY_SHA"
+
+          if ! send_ssm "$DEPLOY_SCRIPT"; then
+            echo "Deployment command failed. Starting rollback."
+            DEPLOY_FAILED=true
+          else
+            DEPLOY_FAILED=false
+          fi
+
+          if [ "$DEPLOY_FAILED" = false ]; then
+            HEALTHY=false
+
+            for attempt in $(seq 1 18); do
+              RESPONSE=$(curl -fsS --max-time 10 \
+                https://djangov2.tc-2026-0053.nixlabs.in/health || true)
+
+              VERSION=$(echo "$RESPONSE" | jq -r '.version // empty' 2>/dev/null || true)
+              STATUS=$(echo "$RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
+
+              if [ "$STATUS" = "ok" ] && [ "$VERSION" = "$DEPLOY_SHA" ]; then
+                HEALTHY=true
+                break
+              fi
+
+              echo "Waiting for correct version... attempt $attempt/18"
+              sleep 10
+            done
+
+            if [ "$HEALTHY" = false ]; then
+              echo "Health check failed. Starting automatic rollback."
+              DEPLOY_FAILED=true
+            fi
+          fi
+
+          if [ "$DEPLOY_FAILED" = true ]; then
+            ROLLBACK_SCRIPT=$(cat <<'EOF'
+          set -euo pipefail
+          cd /opt/techcake-django-app-v2
+
+          PREVIOUS_SHA=$(cat .rollback-sha)
+          echo "APP_VERSION=$PREVIOUS_SHA" > .deploy.env
+
+          aws ecr get-login-password --region ap-south-1 | \
+            docker login --username AWS --password-stdin \
+            506456084381.dkr.ecr.ap-south-1.amazonaws.com
+
+          docker compose --env-file .deploy.env pull django
+          docker compose --env-file .deploy.env up -d django
+          EOF
+            )
+
+            echo "Restoring previous version..."
+            send_ssm "$ROLLBACK_SCRIPT"
+
+            echo "Rollback command completed. Pipeline will fail."
+            exit 1
+          fi
+
+          SAVE_GOOD_VERSION="cd /opt/techcake-django-app-v2 && echo '$DEPLOY_SHA' > .last-good-sha && rm -f .rollback-sha"
+
+          send_ssm "$SAVE_GOOD_VERSION"
+
+          echo "Deployment successful: $DEPLOY_SHA"
