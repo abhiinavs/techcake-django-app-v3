@@ -208,7 +208,7 @@ jobs:
               VERSION=$(echo "$RESPONSE" | jq -r '.version // empty' 2>/dev/null || true)
               STATUS=$(echo "$RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
 
-              if [ "$STATUS" = "ok" ] && [ "$VERSION" = "intentionally-wrong-version" ]; then
+              if [ "$STATUS" = "ok" ] && [ "$VERSION" = "$DEPLOY_SHA" ]; then
                 HEALTHY=true
                 break
               fi
