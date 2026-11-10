@@ -10,14 +10,17 @@ pipeline {
     }
 
     stages {
+
         stage('Checkout') {
             steps {
                 checkout scm
+
                 script {
                     env.IMAGE_TAG = sh(
                         script: 'git rev-parse HEAD',
                         returnStdout: true
                     ).trim()
+
                     echo "Commit SHA: ${env.IMAGE_TAG}"
                 }
             }
@@ -81,7 +84,7 @@ pipeline {
         stage('Deploy') {
             steps {
                 sh '''
-                    set -euo pipefail
+                    set -eu
 
                     send_ssm() {
                         SCRIPT_TEXT="$1" python3 -c \
@@ -89,8 +92,8 @@ pipeline {
                           > /tmp/jenkins-ssm-params.json
 
                         COMMAND_ID=$(aws ssm send-command \
-                          --region ${AWS_REGION} \
-                          --instance-ids ${APP_INSTANCE} \
+                          --region "${AWS_REGION}" \
+                          --instance-ids "${APP_INSTANCE}" \
                           --document-name AWS-RunShellScript \
                           --parameters file:///tmp/jenkins-ssm-params.json \
                           --query 'Command.CommandId' \
@@ -99,11 +102,13 @@ pipeline {
                         echo "SSM Command ID: $COMMAND_ID"
 
                         for attempt in $(seq 1 60); do
+
                             STATUS=$(aws ssm get-command-invocation \
-                              --region ${AWS_REGION} \
+                              --region "${AWS_REGION}" \
                               --command-id "$COMMAND_ID" \
-                              --instance-id ${APP_INSTANCE} \
-                              --query Status --output text 2>/dev/null || true)
+                              --instance-id "${APP_INSTANCE}" \
+                              --query Status \
+                              --output text 2>/dev/null || true)
 
                             if [ "$STATUS" = "Success" ]; then
                                 return 0
@@ -111,11 +116,13 @@ pipeline {
 
                             case "$STATUS" in
                                 Failed|Cancelled|TimedOut|Undeliverable|Terminated)
+
                                     aws ssm get-command-invocation \
-                                      --region ${AWS_REGION} \
+                                      --region "${AWS_REGION}" \
                                       --command-id "$COMMAND_ID" \
-                                      --instance-id ${APP_INSTANCE} \
+                                      --instance-id "${APP_INSTANCE}" \
                                       --output json || true
+
                                     return 1
                                     ;;
                             esac
@@ -127,32 +134,47 @@ pipeline {
                         return 1
                     }
 
-                    DEPLOY_SCRIPT=$(printf '%s\n' \
-                        'set -euo pipefail' \
-                        'cd /opt/techcake-django-app-v2' \
-                        'PREVIOUS_SHA=$(cat .last-good-sha)' \
-                        'echo "$PREVIOUS_SHA" > .rollback-sha' \
-                        "echo 'APP_VERSION=${IMAGE_TAG}' > .deploy.env" \
-                        "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}" \
-                        'docker compose --env-file .deploy.env pull django' \
-                        'docker compose --env-file .deploy.env up -d django'
+                    DEPLOY_SCRIPT=$(cat <<'REMOTE_SCRIPT'
+set -eu
+cd /opt/techcake-django-app-v2
+
+PREVIOUS_SHA=$(cat .last-good-sha)
+echo "$PREVIOUS_SHA" > .rollback-sha
+
+echo "APP_VERSION=__IMAGE_TAG__" > .deploy.env
+
+aws ecr get-login-password --region ap-south-1 |
+docker login --username AWS --password-stdin 506456084381.dkr.ecr.ap-south-1.amazonaws.com
+
+docker compose --env-file .deploy.env pull django
+docker compose --env-file .deploy.env up -d django
+REMOTE_SCRIPT
                     )
 
+                    DEPLOY_SCRIPT=$(printf '%s' "$DEPLOY_SCRIPT" |
+                        sed "s/__IMAGE_TAG__/${IMAGE_TAG}/g")
+
                     if ! send_ssm "$DEPLOY_SCRIPT"; then
+
                         echo "Deployment failed. Starting rollback."
 
-                        ROLLBACK_SCRIPT=$(printf '%s\n'' \
-                            'set -euo pipefail' \
-                            'cd /opt/techcake-django-app-v2' \
-                            'PREVIOUS_SHA=$(cat .rollback-sha)' \
-                            'echo "APP_VERSION=$PREVIOUS_SHA" > .deploy.env' \
-                            "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}" \
-                            'docker compose --env-file .deploy.env pull django' \
-                            'docker compose --env-file .deploy.env up -d django'
+                        ROLLBACK_SCRIPT=$(cat <<'REMOTE_SCRIPT'
+set -eu
+cd /opt/techcake-django-app-v2
+
+PREVIOUS_SHA=$(cat .rollback-sha)
+echo "APP_VERSION=$PREVIOUS_SHA" > .deploy.env
+
+aws ecr get-login-password --region ap-south-1 |
+docker login --username AWS --password-stdin 506456084381.dkr.ecr.ap-south-1.amazonaws.com
+
+docker compose --env-file .deploy.env pull django
+docker compose --env-file .deploy.env up -d django
+REMOTE_SCRIPT
                         )
 
                         if send_ssm "$ROLLBACK_SCRIPT"; then
-                            echo "Rollback completed. Pipeline will fail."
+                            echo "Rollback completed."
                         else
                             echo "CRITICAL: Automatic rollback command failed."
                         fi
@@ -160,7 +182,7 @@ pipeline {
                         exit 1
                     fi
 
-                    echo "Deployment command completed. Proceeding to health verification."
+                    echo "Deployment command completed."
                 '''
             }
         }
@@ -168,7 +190,7 @@ pipeline {
         stage('Verify') {
             steps {
                 sh '''
-                    set -euo pipefail
+                    set -eu
 
                     send_ssm() {
                         SCRIPT_TEXT="$1" python3 -c \
@@ -176,8 +198,8 @@ pipeline {
                           > /tmp/jenkins-ssm-params.json
 
                         COMMAND_ID=$(aws ssm send-command \
-                          --region ${AWS_REGION} \
-                          --instance-ids ${APP_INSTANCE} \
+                          --region "${AWS_REGION}" \
+                          --instance-ids "${APP_INSTANCE}" \
                           --document-name AWS-RunShellScript \
                           --parameters file:///tmp/jenkins-ssm-params.json \
                           --query 'Command.CommandId' \
@@ -186,11 +208,13 @@ pipeline {
                         echo "SSM Command ID: $COMMAND_ID"
 
                         for attempt in $(seq 1 60); do
+
                             STATUS=$(aws ssm get-command-invocation \
-                              --region ${AWS_REGION} \
+                              --region "${AWS_REGION}" \
                               --command-id "$COMMAND_ID" \
-                              --instance-id ${APP_INSTANCE} \
-                              --query Status --output text 2>/dev/null || true)
+                              --instance-id "${APP_INSTANCE}" \
+                              --query Status \
+                              --output text 2>/dev/null || true)
 
                             if [ "$STATUS" = "Success" ]; then
                                 return 0
@@ -198,11 +222,13 @@ pipeline {
 
                             case "$STATUS" in
                                 Failed|Cancelled|TimedOut|Undeliverable|Terminated)
+
                                     aws ssm get-command-invocation \
-                                      --region ${AWS_REGION} \
+                                      --region "${AWS_REGION}" \
                                       --command-id "$COMMAND_ID" \
-                                      --instance-id ${APP_INSTANCE} \
+                                      --instance-id "${APP_INSTANCE}" \
                                       --output json || true
+
                                     return 1
                                     ;;
                             esac
@@ -217,13 +243,16 @@ pipeline {
                     HEALTHY=false
 
                     for attempt in $(seq 1 18); do
-                        RESPONSE=$(curl -fsS --max-time 10 ${HEALTH_URL} || true)
+
+                        RESPONSE=$(curl -fsS --max-time 10 "${HEALTH_URL}" || true)
 
                         VERSION=$(echo "$RESPONSE" | python3 -c \
-                          'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true)
+                          'import json,sys; print(json.load(sys.stdin).get("version",""))' \
+                          2>/dev/null || true)
 
                         STATUS=$(echo "$RESPONSE" | python3 -c \
-                          'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || true)
+                          'import json,sys; print(json.load(sys.stdin).get("status",""))' \
+                          2>/dev/null || true)
 
                         if [ "$STATUS" = "ok" ] && [ "$VERSION" = "${IMAGE_TAG}" ]; then
                             HEALTHY=true
@@ -235,16 +264,22 @@ pipeline {
                     done
 
                     if [ "$HEALTHY" = false ]; then
+
                         echo "Verification failed. Starting rollback."
 
-                        ROLLBACK_SCRIPT=$(printf '%s\n' \
-                            'set -euo pipefail' \
-                            'cd /opt/techcake-django-app-v2' \
-                            'PREVIOUS_SHA=$(cat .rollback-sha)' \
-                            'echo "APP_VERSION=$PREVIOUS_SHA" > .deploy.env' \
-                            "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}" \
-                            'docker compose --env-file .deploy.env pull django' \
-                            'docker compose --env-file .deploy.env up -d django'
+                        ROLLBACK_SCRIPT=$(cat <<'REMOTE_SCRIPT'
+set -eu
+cd /opt/techcake-django-app-v2
+
+PREVIOUS_SHA=$(cat .rollback-sha)
+echo "APP_VERSION=$PREVIOUS_SHA" > .deploy.env
+
+aws ecr get-login-password --region ap-south-1 |
+docker login --username AWS --password-stdin 506456084381.dkr.ecr.ap-south-1.amazonaws.com
+
+docker compose --env-file .deploy.env pull django
+docker compose --env-file .deploy.env up -d django
+REMOTE_SCRIPT
                         )
 
                         if send_ssm "$ROLLBACK_SCRIPT"; then
@@ -256,12 +291,17 @@ pipeline {
                         exit 1
                     fi
 
-                    SAVE_SCRIPT=$(printf '%s\n' \
-                        'set -euo pipefail' \
-                        'cd /opt/techcake-django-app-v2' \
-                        "echo '${IMAGE_TAG}' > .last-good-sha" \
-                        'rm -f .rollback-sha'
+                    SAVE_SCRIPT=$(cat <<'REMOTE_SCRIPT'
+set -eu
+cd /opt/techcake-django-app-v2
+
+echo "__IMAGE_TAG__" > .last-good-sha
+rm -f .rollback-sha
+REMOTE_SCRIPT
                     )
+
+                    SAVE_SCRIPT=$(printf '%s' "$SAVE_SCRIPT" |
+                        sed "s/__IMAGE_TAG__/${IMAGE_TAG}/g")
 
                     send_ssm "$SAVE_SCRIPT"
 
