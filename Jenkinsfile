@@ -115,8 +115,7 @@ pipeline {
                                       --region ${AWS_REGION} \
                                       --command-id "$COMMAND_ID" \
                                       --instance-id ${APP_INSTANCE} \
-                                      --query StandardErrorContent \
-                                      --output text || true
+                                      --output json || true
                                     return 1
                                     ;;
                             esac
@@ -128,36 +127,40 @@ pipeline {
                         return 1
                     }
 
-                    DEPLOY_SCRIPT=$(cat <<EOF
-set -euo pipefail
-cd /opt/techcake-django-app-v2
-PREVIOUS_SHA=\\$(cat .last-good-sha)
-echo "\\$PREVIOUS_SHA" > .rollback-sha
-echo "APP_VERSION=${IMAGE_TAG}" > .deploy.env
-aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
-docker compose --env-file .deploy.env pull django
-docker compose --env-file .deploy.env up -d django
-EOF
+                    DEPLOY_SCRIPT=$(printf '%s\n' \
+                        'set -euo pipefail' \
+                        'cd /opt/techcake-django-app-v2' \
+                        'PREVIOUS_SHA=$(cat .last-good-sha)' \
+                        'echo "$PREVIOUS_SHA" > .rollback-sha' \
+                        "echo 'APP_VERSION=${IMAGE_TAG}' > .deploy.env" \
+                        "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}" \
+                        'docker compose --env-file .deploy.env pull django' \
+                        'docker compose --env-file .deploy.env up -d django'
                     )
 
                     if ! send_ssm "$DEPLOY_SCRIPT"; then
                         echo "Deployment failed. Starting rollback."
 
-                        ROLLBACK_SCRIPT=$(cat <<'EOF'
-set -euo pipefail
-cd /opt/techcake-django-app-v2
-PREVIOUS_SHA=$(cat .rollback-sha)
-echo "APP_VERSION=$PREVIOUS_SHA" > .deploy.env
-aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 506456084381.dkr.ecr.ap-south-1.amazonaws.com
-docker compose --env-file .deploy.env pull django
-docker compose --env-file .deploy.env up -d django
-EOF
+                        ROLLBACK_SCRIPT=$(printf '%s\n'' \
+                            'set -euo pipefail' \
+                            'cd /opt/techcake-django-app-v2' \
+                            'PREVIOUS_SHA=$(cat .rollback-sha)' \
+                            'echo "APP_VERSION=$PREVIOUS_SHA" > .deploy.env' \
+                            "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}" \
+                            'docker compose --env-file .deploy.env pull django' \
+                            'docker compose --env-file .deploy.env up -d django'
                         )
 
-                        send_ssm "$ROLLBACK_SCRIPT"
-                        echo "Rollback completed. Pipeline will fail."
+                        if send_ssm "$ROLLBACK_SCRIPT"; then
+                            echo "Rollback completed. Pipeline will fail."
+                        else
+                            echo "CRITICAL: Automatic rollback command failed."
+                        fi
+
                         exit 1
                     fi
+
+                    echo "Deployment command completed. Proceeding to health verification."
                 '''
             }
         }
@@ -180,6 +183,8 @@ EOF
                           --query 'Command.CommandId' \
                           --output text)
 
+                        echo "SSM Command ID: $COMMAND_ID"
+
                         for attempt in $(seq 1 60); do
                             STATUS=$(aws ssm get-command-invocation \
                               --region ${AWS_REGION} \
@@ -193,6 +198,11 @@ EOF
 
                             case "$STATUS" in
                                 Failed|Cancelled|TimedOut|Undeliverable|Terminated)
+                                    aws ssm get-command-invocation \
+                                      --region ${AWS_REGION} \
+                                      --command-id "$COMMAND_ID" \
+                                      --instance-id ${APP_INSTANCE} \
+                                      --output json || true
                                     return 1
                                     ;;
                             esac
@@ -200,6 +210,7 @@ EOF
                             sleep 5
                         done
 
+                        echo "SSM command timed out"
                         return 1
                     }
 
@@ -226,23 +237,31 @@ EOF
                     if [ "$HEALTHY" = false ]; then
                         echo "Verification failed. Starting rollback."
 
-                        ROLLBACK_SCRIPT=$(cat <<'EOF'
-set -euo pipefail
-cd /opt/techcake-django-app-v2
-PREVIOUS_SHA=$(cat .rollback-sha)
-echo "APP_VERSION=$PREVIOUS_SHA" > .deploy.env
-aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 506456084381.dkr.ecr.ap-south-1.amazonaws.com
-docker compose --env-file .deploy.env pull django
-docker compose --env-file .deploy.env up -d django
-EOF
+                        ROLLBACK_SCRIPT=$(printf '%s\n' \
+                            'set -euo pipefail' \
+                            'cd /opt/techcake-django-app-v2' \
+                            'PREVIOUS_SHA=$(cat .rollback-sha)' \
+                            'echo "APP_VERSION=$PREVIOUS_SHA" > .deploy.env' \
+                            "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}" \
+                            'docker compose --env-file .deploy.env pull django' \
+                            'docker compose --env-file .deploy.env up -d django'
                         )
 
-                        send_ssm "$ROLLBACK_SCRIPT"
-                        echo "Rollback completed. Pipeline will fail."
+                        if send_ssm "$ROLLBACK_SCRIPT"; then
+                            echo "Rollback completed."
+                        else
+                            echo "CRITICAL: Automatic rollback command failed."
+                        fi
+
                         exit 1
                     fi
 
-                    SAVE_SCRIPT="cd /opt/techcake-django-app-v2 && echo '${IMAGE_TAG}' > .last-good-sha && rm -f .rollback-sha"
+                    SAVE_SCRIPT=$(printf '%s\n' \
+                        'set -euo pipefail' \
+                        'cd /opt/techcake-django-app-v2' \
+                        "echo '${IMAGE_TAG}' > .last-good-sha" \
+                        'rm -f .rollback-sha'
+                    )
 
                     send_ssm "$SAVE_SCRIPT"
 
