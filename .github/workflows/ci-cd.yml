@@ -148,6 +148,8 @@ jobs:
 
       - name: Start CodeDeploy deployment
         run: |
+          set -euo pipefail
+
           DEPLOYMENT_ID=$(aws deploy create-deployment \
             --application-name "$CODEDEPLOY_APP" \
             --deployment-group-name "$CODEDEPLOY_GROUP" \
@@ -161,7 +163,32 @@ jobs:
 
       - name: Wait for deployment result
         run: |
-          aws deploy wait deployment-successful \
-            --deployment-id "$DEPLOYMENT_ID"
+          set -euo pipefail
 
-          echo "CodeDeploy deployment successful."
+          echo "Waiting for CodeDeploy deployment: $DEPLOYMENT_ID"
+
+          for attempt in {1..60}; do
+            STATUS=$(aws deploy get-deployment \
+              --deployment-id "$DEPLOYMENT_ID" \
+              --query 'deploymentInfo.status' \
+              --output text)
+
+            echo "Attempt $attempt: $STATUS"
+
+            if [ "$STATUS" = "Succeeded" ]; then
+              echo "CodeDeploy deployment successful."
+              exit 0
+            fi
+
+            if [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Stopped" ]; then
+              echo "ERROR: CodeDeploy deployment ended with status: $STATUS"
+              aws deploy get-deployment \
+                --deployment-id "$DEPLOYMENT_ID"
+              exit 1
+            fi
+
+            sleep 30
+          done
+
+          echo "ERROR: Timed out waiting for CodeDeploy deployment."
+          exit 1
