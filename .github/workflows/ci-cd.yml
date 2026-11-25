@@ -1,3 +1,4 @@
+
 name: Django CI/CD
 
 on:
@@ -99,7 +100,7 @@ jobs:
             ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${GITHUB_SHA}
 
   deploy:
-    name: Deploy to EC2 with Automatic Rollback
+    name: Deploy with AWS CodeDeploy Blue Green
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -110,145 +111,57 @@ jobs:
 
     env:
       AWS_REGION: ap-south-1
-      INSTANCE_ID: i-0469d99aa3e2a6a7a
+      AWS_ACCOUNT_ID: "506456084381"
+      ECR_REPOSITORY: techcake-django-app-v3
+      S3_BUCKET: techcake-codedeploy-506456084381
       DEPLOY_SHA: ${{ github.sha }}
+      CODEDEPLOY_APP: techcake-bluegreen-app
+      CODEDEPLOY_GROUP: techcake-bluegreen-dg
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::506456084381:role/GitHubActionsECRPushRole
           aws-region: ap-south-1
 
-      - name: Deploy, verify and rollback if necessary
-        shell: bash
+      - name: Prepare CodeDeploy package
         run: |
           set -euo pipefail
 
-          send_ssm() {
-            local script="$1"
-            local params
-            params=$(jq -n --arg script "$script" '{commands: [$script]}')
+          IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${DEPLOY_SHA}"
 
-            local command_id
-            command_id=$(aws ssm send-command \
-              --instance-ids "$INSTANCE_ID" \
-              --document-name "AWS-RunShellScript" \
-              --parameters "$params" \
-              --query "Command.CommandId" \
-              --output text)
+          printf '%s\n' "$IMAGE_URI" > image_uri.txt
 
-            echo "SSM Command ID: $command_id"
+          zip -r deployment.zip appspec.yml scripts image_uri.txt
 
-            for attempt in $(seq 1 60); do
-              local status
-              status=$(aws ssm get-command-invocation \
-                --command-id "$command_id" \
-                --instance-id "$INSTANCE_ID" \
-                --query "Status" \
-                --output text 2>/dev/null || true)
+          echo "Prepared deployment package for:"
+          cat image_uri.txt
 
-              if [ "$status" = "Success" ]; then
-                echo "SSM command succeeded."
-                return 0
-              fi
+      - name: Upload deployment package to S3
+        run: |
+          aws s3 cp deployment.zip \
+            "s3://${S3_BUCKET}/codedeploy/${DEPLOY_SHA}.zip"
 
-              case "$status" in
-                Failed|Cancelled|TimedOut|Undeliverable|Terminated)
-                  aws ssm get-command-invocation \
-                    --command-id "$command_id" \
-                    --instance-id "$INSTANCE_ID" \
-                    --query "StandardErrorContent" \
-                    --output text || true
-                  return 1
-                  ;;
-              esac
+      - name: Start CodeDeploy deployment
+        run: |
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name "$CODEDEPLOY_APP" \
+            --deployment-group-name "$CODEDEPLOY_GROUP" \
+            --revision "revisionType=S3,s3Location={bucket=${S3_BUCKET},key=codedeploy/${DEPLOY_SHA}.zip,bundleType=zip}" \
+            --description "GitHub deployment ${DEPLOY_SHA}" \
+            --query deploymentId \
+            --output text)
 
-              sleep 5
-            done
+          echo "Deployment ID: $DEPLOYMENT_ID"
+          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
 
-            echo "SSM command timed out."
-            return 1
-          }
+      - name: Wait for deployment result
+        run: |
+          aws deploy wait deployment-successful \
+            --deployment-id "$DEPLOYMENT_ID"
 
-          DEPLOY_SCRIPT=$(cat <<EOF
-          set -euo pipefail
-          cd /opt/techcake-django-app-v2
-
-          PREVIOUS_SHA=\$(cat .last-good-sha)
-          echo "\$PREVIOUS_SHA" > .rollback-sha
-
-          echo "APP_VERSION=$DEPLOY_SHA" > .deploy.env
-
-          aws ecr get-login-password --region ap-south-1 | \
-            docker login --username AWS --password-stdin \
-            506456084381.dkr.ecr.ap-south-1.amazonaws.com
-
-          docker compose --env-file .deploy.env pull django
-          docker compose --env-file .deploy.env up -d django
-          EOF
-          )
-
-          echo "Deploying commit: $DEPLOY_SHA"
-
-          if ! send_ssm "$DEPLOY_SCRIPT"; then
-            echo "Deployment command failed. Starting rollback."
-            DEPLOY_FAILED=true
-          else
-            DEPLOY_FAILED=false
-          fi
-
-          if [ "$DEPLOY_FAILED" = false ]; then
-            HEALTHY=false
-
-            for attempt in $(seq 1 18); do
-              RESPONSE=$(curl -fsS --max-time 10 \
-                https://djangov2.tc-2026-0053.nixlabs.in/health || true)
-
-              VERSION=$(echo "$RESPONSE" | jq -r '.version // empty' 2>/dev/null || true)
-              STATUS=$(echo "$RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
-
-              if [ "$STATUS" = "ok" ] && [ "$VERSION" = "$DEPLOY_SHA" ]; then
-                HEALTHY=true
-                break
-              fi
-
-              echo "Waiting for correct version... attempt $attempt/18"
-              sleep 10
-            done
-
-            if [ "$HEALTHY" = false ]; then
-              echo "Health check failed. Starting automatic rollback."
-              DEPLOY_FAILED=true
-            fi
-          fi
-
-          if [ "$DEPLOY_FAILED" = true ]; then
-            ROLLBACK_SCRIPT=$(cat <<'EOF'
-          set -euo pipefail
-          cd /opt/techcake-django-app-v2
-
-          PREVIOUS_SHA=$(cat .rollback-sha)
-          echo "APP_VERSION=$PREVIOUS_SHA" > .deploy.env
-
-          aws ecr get-login-password --region ap-south-1 | \
-            docker login --username AWS --password-stdin \
-            506456084381.dkr.ecr.ap-south-1.amazonaws.com
-
-          docker compose --env-file .deploy.env pull django
-          docker compose --env-file .deploy.env up -d django
-          EOF
-            )
-
-            echo "Restoring previous version..."
-            send_ssm "$ROLLBACK_SCRIPT"
-
-            echo "Rollback command completed. Pipeline will fail."
-            exit 1
-          fi
-
-          SAVE_GOOD_VERSION="cd /opt/techcake-django-app-v2 && echo '$DEPLOY_SHA' > .last-good-sha && rm -f .rollback-sha"
-
-          send_ssm "$SAVE_GOOD_VERSION"
-
-          echo "Deployment successful: $DEPLOY_SHA"
+          echo "CodeDeploy deployment successful."
