@@ -133,10 +133,24 @@ jobs:
         run: |
           set -euo pipefail
 
+          IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${DEPLOY_SHA}"
+
+          REMOTE_SCRIPT=$(printf '%s\n' \
+            'set -euo pipefail' \
+            "REGION=${AWS_REGION}" \
+            "ACCOUNT=${AWS_ACCOUNT_ID}" \
+            "IMAGE_URI=${IMAGE_URI}" \
+            'aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"' \
+            'docker pull "$IMAGE_URI"' \
+            'docker inspect techcake-app --format "{{range .Config.Env}}{{println .}}{{end}}" > /tmp/techcake-migration.env' \
+            'trap '\''rm -f /tmp/techcake-migration.env'\'' EXIT' \
+            'docker run --rm --network host --env-file /tmp/techcake-migration.env "$IMAGE_URI" python manage.py migrate --noinput' \
+            'echo "Database migrations completed successfully."')
+
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$MIGRATION_INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["sudo docker exec techcake-app python manage.py migrate --noinput"]' \
+            --parameters "$(jq -n --arg cmd "$REMOTE_SCRIPT" '{commands: [$cmd]}')" \
             --comment "Database migrations for ${DEPLOY_SHA}" \
             --query 'Command.CommandId' \
             --output text)
@@ -153,7 +167,7 @@ jobs:
             echo "Migration attempt $attempt: $STATUS"
 
             if [ "$STATUS" = "Success" ]; then
-              echo "Database migrations completed successfully."
+              echo "Migrations succeeded."
               exit 0
             fi
 
@@ -168,7 +182,7 @@ jobs:
             sleep 10
           done
 
-          echo "ERROR: Timed out waiting for database migrations."
+          echo "ERROR: Timed out waiting for migrations."
           exit 1
 
       - name: Prepare CodeDeploy package
