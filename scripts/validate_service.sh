@@ -4,6 +4,7 @@ set -euo pipefail
 echo "Validating Techcake application..."
 
 HEALTH_FILE="/tmp/techcake-health.json"
+rm -f "$HEALTH_FILE"
 
 for attempt in {1..30}; do
   if curl -fsS http://localhost:8000/health -o "$HEALTH_FILE"; then
