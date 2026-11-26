@@ -104,6 +104,7 @@ jobs:
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     permissions:
       contents: read
@@ -115,7 +116,6 @@ jobs:
       ECR_REPOSITORY: techcake-django-app-v3
       S3_BUCKET: techcake-codedeploy-506456084381
       DEPLOY_SHA: ${{ github.sha }}
-      MIGRATION_INSTANCE_ID: i-01d1f8ec11fc38fc4
       CODEDEPLOY_APP: techcake-bluegreen-app
       CODEDEPLOY_GROUP: techcake-bluegreen-dg
 
@@ -132,6 +132,51 @@ jobs:
       - name: Run database migrations once
         run: |
           set -euo pipefail
+
+          echo "Finding healthy application instances..."
+
+          TARGET_GROUP_ARN=$(aws elbv2 describe-target-groups \
+            --names techcake-app-tg \
+            --query 'TargetGroups[0].TargetGroupArn' \
+            --output text)
+
+          if [ -z "$TARGET_GROUP_ARN" ] || [ "$TARGET_GROUP_ARN" = "None" ]; then
+            echo "ERROR: Could not find target group techcake-app-tg."
+            exit 1
+          fi
+
+          HEALTHY_TARGETS=$(aws elbv2 describe-target-health \
+            --target-group-arn "$TARGET_GROUP_ARN" \
+            --output json \
+            | jq -r '.TargetHealthDescriptions[]? | select(.TargetHealth.State == "healthy") | .Target.Id')
+
+          ONLINE_INSTANCES=$(aws ssm describe-instance-information \
+            --filters Key=PingStatus,Values=Online \
+            --output json \
+            | jq -r '.InstanceInformationList[]?.InstanceId')
+
+          echo "Healthy ALB targets:"
+          echo "$HEALTHY_TARGETS"
+
+          echo "SSM online instances:"
+          echo "$ONLINE_INSTANCES"
+
+          MIGRATION_INSTANCE_ID=""
+
+          while IFS= read -r TARGET_ID; do
+            if [ -n "$TARGET_ID" ] && grep -Fxq -- "$TARGET_ID" <<< "$ONLINE_INSTANCES"; then
+              MIGRATION_INSTANCE_ID="$TARGET_ID"
+              break
+            fi
+          done <<< "$HEALTHY_TARGETS"
+
+          if [ -z "$MIGRATION_INSTANCE_ID" ]; then
+            echo "ERROR: No healthy ALB instance is connected to SSM."
+            echo "Check the EC2 SSM Agent and instance IAM role."
+            exit 1
+          fi
+
+          echo "Selected migration instance: $MIGRATION_INSTANCE_ID"
 
           IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${DEPLOY_SHA}"
 
@@ -226,7 +271,7 @@ jobs:
 
           echo "Waiting for CodeDeploy deployment: $DEPLOYMENT_ID"
 
-          for attempt in {1..60}; do
+          for attempt in {1..150}; do
             STATUS=$(aws deploy get-deployment \
               --deployment-id "$DEPLOYMENT_ID" \
               --query 'deploymentInfo.status' \
