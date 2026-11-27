@@ -31,3 +31,7 @@ fi
 
 echo "Validation successful:"
 cat "$HEALTH_FILE"
+
+# INTENTIONAL FAILURE FOR AUTOMATIC ROLLBACK TEST
+echo "ERROR: Intentional failure to test CodeDeploy automatic rollback."
+exit 1
