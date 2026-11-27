@@ -128,6 +128,7 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::506456084381:role/GitHubActionsECRPushRole
           aws-region: ap-south-1
+          role-duration-seconds: 7200
 
       - name: Run database migrations once
         run: |
